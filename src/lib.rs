@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Error, string::ParseError};
 
 // Define node types
+#[derive(Debug, PartialEq, Eq)]
 pub enum NodeType {
     NULL,
     FALSE,
@@ -21,13 +22,14 @@ pub enum NodeValue {
 }
 
 // Define the INode trait
-pub trait INode {
+pub trait INode: std::fmt::Debug {
     fn node_type(&self) -> NodeType;
     fn value(&self) -> NodeValue;
     fn clone_node(&self) -> Box<dyn INode>;
 }
 
 // NullNode implementation
+#[derive(Debug)]
 pub struct NullNode;
 
 impl INode for NullNode {
@@ -45,6 +47,7 @@ impl INode for NullNode {
 }
 
 // TrueNode implementation
+#[derive(Debug)]
 pub struct TrueNode;
 
 impl INode for TrueNode {
@@ -62,6 +65,7 @@ impl INode for TrueNode {
 }
 
 // FalseNode implementation
+#[derive(Debug)]
 pub struct FalseNode;
 
 impl INode for FalseNode {
@@ -79,6 +83,7 @@ impl INode for FalseNode {
 }
 
 // NumberNode implementation
+#[derive(Debug)]
 pub struct NumberNode {
     num: f32,
 }
@@ -98,6 +103,7 @@ impl INode for NumberNode {
 }
 
 // StringNode implementation
+#[derive(Debug)]
 pub struct StringNode {
     str_value: String,
 }
@@ -119,6 +125,7 @@ impl INode for StringNode {
 }
 
 // ArrayNode now contains Vec<Box<dyn INode>>
+#[derive(Debug)]
 pub struct ArrayNode {
     list: Vec<Box<dyn INode>>,
 }
@@ -140,6 +147,7 @@ impl INode for ArrayNode {
 }
 
 // ObjectNode now contains HashMap<String, Box<dyn INode>>
+#[derive(Debug)]
 pub struct ObjectNode {
     map: HashMap<String, Box<dyn INode>>,
 }
@@ -166,6 +174,29 @@ impl INode for ObjectNode {
             .collect();
         Box::new(ObjectNode { map: cloned_map })
     }
+}
+
+enum Literal {
+    NULL,
+    TRUE,
+    FALSE,
+}
+
+#[derive(Debug)]
+pub enum DecoderError {
+    ExpectValue,
+    InvalidValue,
+    RootNotSingular,
+    NumberTooBig,
+    MissQuotationMark,
+    InvalidStringEscape,
+    InvalidStringChar,
+    InvalidUnicodeHex,
+    InvalidUnicodeSurrogate,
+    MissCommaOrSquareBracket,
+    MissKey,
+    MissColon,
+    MissCommaOrCurlyBracket,
 }
 
 #[derive(Debug)]
@@ -196,40 +227,133 @@ impl JsonDecoder {
         self.text.as_bytes().get(self.pos).copied().unwrap_or(b'\0')
     }
 
-    pub fn decode(&mut self, text: String) -> Box<dyn INode> {
+    pub fn decode(&mut self, text: String) -> Result<Box<dyn INode>, DecoderError> {
         self.text = text;
-        return self.parse();
+        self.parse_whitespace();
+        let res = self.parse();
+        match res {
+            Ok(node) => {
+                self.parse_whitespace();
+                if self.ch() != b'\0' {
+                    Err(DecoderError::RootNotSingular)
+                } else {
+                    Ok(node)
+                }
+            }
+            Err(err) => Err(err),
+        }
     }
 
-    fn parse(&self) -> Box<dyn INode> {
+    fn parse(&mut self) -> Result<Box<dyn INode>, DecoderError> {
         let ch: u8 = self.ch();
         match ch {
-            b't' | b'f' | b'n' => self.parse_literal(),
+            b't' => self.parse_literal(Literal::TRUE),
+            b'f' => self.parse_literal(Literal::FALSE),
+            b'n' => self.parse_literal(Literal::NULL),
             b'[' => self.parse_array(),
             b'{' => self.parse_object(),
             b'"' => self.parse_string(),
-            b'\0' => panic!(),
+            b'\0' => Err(DecoderError::ExpectValue),
             _ => self.parse_number(),
         }
     }
 
-    fn parse_string(&self) -> Box<dyn INode> {
+    fn parse_whitespace(&mut self) {
+        while self.ch().is_ascii_whitespace() {
+            self.pos += 1
+        }
+    }
+
+    fn parse_string(&self) -> Result<Box<dyn INode>, DecoderError> {
         todo!()
     }
 
-    fn parse_number(&self) -> Box<dyn INode> {
+    fn parse_number(&self) -> Result<Box<dyn INode>, DecoderError> {
         todo!()
     }
 
-    fn parse_literal(&self) -> Box<dyn INode> {
+    fn parse_literal(&mut self, literal: Literal) -> Result<Box<dyn INode>, DecoderError> {
+        let literal_string: &[u8] = match literal {
+            Literal::NULL => b"null",
+            Literal::TRUE => b"true",
+            Literal::FALSE => b"false",
+        };
+
+        let mut pos = self.pos;
+        for index in 0..literal_string.len() {
+            if self.text.as_bytes().get(pos).copied().unwrap_or(b'\0') != literal_string[index] {
+                return Err(DecoderError::InvalidValue);
+            }
+            pos += 1;
+        }
+
+        self.pos += literal_string.len();
+        match literal {
+            Literal::NULL => Ok(Box::new(NullNode {})),
+            Literal::TRUE => Ok(Box::new(TrueNode {})),
+            Literal::FALSE => Ok(Box::new(FalseNode {})),
+        }
+    }
+
+    fn parse_array(&self) -> Result<Box<dyn INode>, DecoderError> {
         todo!()
     }
 
-    fn parse_array(&self) -> Box<dyn INode> {
+    fn parse_object(&self) -> Result<Box<dyn INode>, DecoderError> {
         todo!()
     }
+}
 
-    fn parse_object(&self) -> Box<dyn INode> {
-        todo!()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_literal_null() {
+        let mut decoder = JsonDecoder::new();
+        let result = decoder.decode(String::from("null"));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().node_type(), NodeType::NULL);
+    }
+
+    #[test]
+    fn test_parse_literal_true() {
+        let mut decoder = JsonDecoder::new();
+        let result = decoder.decode(String::from("true"));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().node_type(), NodeType::TRUE);
+    }
+
+    #[test]
+    fn test_parse_literal_false() {
+        let mut decoder = JsonDecoder::new();
+        let result = decoder.decode(String::from("false"));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().node_type(), NodeType::FALSE);
+    }
+
+    #[test]
+    fn test_parse_literal_invalid() {
+        let mut decoder = JsonDecoder::new();
+
+        let result = decoder.decode(String::from("nulx"));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DecoderError::InvalidValue));
+
+        let result = decoder.decode(String::from("tru"));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DecoderError::InvalidValue));
+
+        let result = decoder.decode(String::from(""));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DecoderError::ExpectValue));
+    }
+
+    #[test]
+    fn test_parse_literal_with_offset() {
+        let mut decoder = JsonDecoder::new();
+        let result = decoder.decode(String::from("   null  "));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().node_type(), NodeType::NULL);
     }
 }
