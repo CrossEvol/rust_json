@@ -457,8 +457,32 @@ impl JsonDecoder {
         }
     }
 
-    fn parse_array(&self) -> Result<Box<dyn INode>, DecoderError> {
-        todo!()
+    fn parse_array(&mut self) -> Result<Box<dyn INode>, DecoderError> {
+        self.expect(b'[');
+        self.parse_whitespace();
+        if self.ch() == b']' {
+            self.advance();
+            Ok(Box::new(ArrayNode { list: vec![] }))
+        } else {
+            let mut list: Vec<Box<dyn INode>> = vec![];
+            loop {
+                let element = self.parse();
+                if element.is_err() {
+                    return element;
+                }
+                list.push(element.unwrap());
+                self.parse_whitespace();
+                if self.ch() == b',' {
+                    self.advance();
+                    self.parse_whitespace();
+                } else if self.ch() == b']' {
+                    self.advance();
+                    return Ok(Box::new(ArrayNode { list }));
+                } else {
+                    return Err(DecoderError::MissCommaOrSquareBracket);
+                }
+            }
+        }
     }
 
     fn parse_object(&self) -> Result<Box<dyn INode>, DecoderError> {
@@ -750,6 +774,103 @@ mod tests {
             assert!(
                 matches!(result.unwrap_err(), DecoderError::MissQuotationMark),
                 "Expected MissQuotationMark error for input: {}",
+                json
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_array() {
+        // Test empty array
+        let mut decoder = JsonDecoder::new();
+        let result = decoder.decode(String::from("[ ]"));
+        assert!(result.is_ok());
+        let node = result.unwrap();
+        assert_eq!(node.node_type(), NodeType::ARRAY);
+        if let NodeValue::Array(elements) = node.value() {
+            assert_eq!(elements.len(), 0);
+        } else {
+            panic!("Expected NodeValue::Array");
+        }
+
+        // Test array with multiple elements of different types
+        let mut decoder = JsonDecoder::new();
+        let result = decoder.decode(String::from("[ null , false , true , 123 , \"abc\" ]"));
+        assert!(result.is_ok());
+        let node = result.unwrap();
+        assert_eq!(node.node_type(), NodeType::ARRAY);
+        if let NodeValue::Array(elements) = node.value() {
+            assert_eq!(elements.len(), 5);
+            assert_eq!(elements[0].node_type(), NodeType::NULL);
+            assert_eq!(elements[1].node_type(), NodeType::FALSE);
+            assert_eq!(elements[2].node_type(), NodeType::TRUE);
+            assert_eq!(elements[3].node_type(), NodeType::NUMBER);
+            assert_eq!(elements[4].node_type(), NodeType::STRING);
+
+            // Check number value
+            if let NodeValue::Number(num) = elements[3].value() {
+                assert_eq!(num, 123.0);
+            } else {
+                panic!("Expected NodeValue::Number");
+            }
+
+            // Check string value
+            if let NodeValue::Text(text) = elements[4].value() {
+                assert_eq!(text, "abc");
+            } else {
+                panic!("Expected NodeValue::Text");
+            }
+        } else {
+            panic!("Expected NodeValue::Array");
+        }
+
+        // Test nested arrays
+        let mut decoder = JsonDecoder::new();
+        let result = decoder.decode(String::from("[ [ ] , [ 0 ] , [ 0 , 1 ] , [ 0 , 1 , 2 ] ]"));
+        assert!(result.is_ok());
+        let node = result.unwrap();
+        assert_eq!(node.node_type(), NodeType::ARRAY);
+        if let NodeValue::Array(elements) = node.value() {
+            assert_eq!(elements.len(), 4);
+
+            for i in 0..4 {
+                assert_eq!(elements[i].node_type(), NodeType::ARRAY);
+                if let NodeValue::Array(inner_elements) = elements[i].value() {
+                    assert_eq!(inner_elements.len(), i);
+
+                    for j in 0..i {
+                        assert_eq!(inner_elements[j].node_type(), NodeType::NUMBER);
+                        if let NodeValue::Number(num) = inner_elements[j].value() {
+                            assert_eq!(num, j as f64);
+                        } else {
+                            panic!("Expected NodeValue::Number");
+                        }
+                    }
+                } else {
+                    panic!("Expected NodeValue::Array");
+                }
+            }
+        } else {
+            panic!("Expected NodeValue::Array");
+        }
+    }
+
+    #[test]
+    fn test_parse_miss_comma_or_square_bracket() {
+        let test_cases = vec![
+            "[1",   // Missing closing bracket
+            "[1}",  // Wrong closing bracket
+            "[1 2", // Missing comma between elements
+            "[[]",  // Missing closing bracket for outer array
+        ];
+
+        for json in test_cases {
+            let mut decoder = JsonDecoder::new();
+            let result = decoder.decode(String::from(json));
+            assert!(result.is_err(), "Expected error for input: {}", json);
+            assert!(
+                matches!(result.unwrap_err(), DecoderError::MissCommaOrSquareBracket),
+                "Expected MissCommaOrSquareBracket error for input: {}",
                 json
             );
         }

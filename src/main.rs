@@ -28,7 +28,7 @@ fn main() {
     let mut decoder = JsonDecoder::new();
     println!("{decoder:?}");
 
-    let node = decoder.decode(String::from("\"text\""));
+    let node = decoder.decode(String::from("[ null , false , true , 123 , \"abc\" ]"));
     println!("{node:?}");
 
     println!("----------------------------------------");
