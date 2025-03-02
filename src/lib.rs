@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
 // Define node types
 #[derive(Debug, PartialEq, Eq)]
@@ -18,7 +19,7 @@ pub enum NodeValue {
     Text(String),
     Number(f64),
     Array(Vec<Box<dyn INode>>),
-    Object(HashMap<String, Box<dyn INode>>),
+    Object(HashMap<Box<StringNode>, Box<dyn INode>>),
 }
 
 // Define the INode trait
@@ -124,6 +125,29 @@ impl INode for StringNode {
     }
 }
 
+impl PartialEq for StringNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.str_value == other.str_value
+    }
+}
+
+impl Eq for StringNode {}
+
+impl Hash for StringNode {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.str_value.hash(state);
+    }
+}
+
+impl StringNode {
+    // Add this helper method to clone directly to a StringNode
+    pub fn clone_string_node(&self) -> Box<StringNode> {
+        Box::new(StringNode {
+            str_value: self.str_value.to_owned(),
+        })
+    }
+}
+
 // ArrayNode now contains Vec<Box<dyn INode>>
 #[derive(Debug)]
 pub struct ArrayNode {
@@ -149,7 +173,7 @@ impl INode for ArrayNode {
 // ObjectNode now contains HashMap<String, Box<dyn INode>>
 #[derive(Debug)]
 pub struct ObjectNode {
-    map: HashMap<String, Box<dyn INode>>,
+    map: HashMap<Box<StringNode>, Box<dyn INode>>,
 }
 
 impl INode for ObjectNode {
@@ -161,7 +185,7 @@ impl INode for ObjectNode {
         let cloned_map = self
             .map
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone_node()))
+            .map(|(k, v)| (k.clone_string_node(), v.clone_node()))
             .collect();
         NodeValue::Object(cloned_map)
     }
@@ -170,7 +194,7 @@ impl INode for ObjectNode {
         let cloned_map = self
             .map
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone_node()))
+            .map(|(k, v)| (k.clone_string_node(), v.clone_node()))
             .collect();
         Box::new(ObjectNode { map: cloned_map })
     }
@@ -275,7 +299,11 @@ impl JsonDecoder {
             b'n' => self.parse_literal(Literal::NULL),
             b'[' => self.parse_array(),
             b'{' => self.parse_object(),
-            b'"' => self.parse_string(),
+            b'"' => {
+                // Convert Box<StringNode> to Box<dyn INode>
+                let string_result = self.parse_string();
+                string_result.map(|node| node as Box<dyn INode>)
+            }
             b'\0' => Err(DecoderError::ExpectValue),
             _ => self.parse_number(),
         }
@@ -287,7 +315,7 @@ impl JsonDecoder {
         }
     }
 
-    fn parse_string(&mut self) -> Result<Box<dyn INode>, DecoderError> {
+    fn parse_string(&mut self) -> Result<Box<StringNode>, DecoderError> {
         self.expect(b'"');
         loop {
             match self.ch() {
@@ -485,8 +513,48 @@ impl JsonDecoder {
         }
     }
 
-    fn parse_object(&self) -> Result<Box<dyn INode>, DecoderError> {
-        todo!()
+    fn parse_object(&mut self) -> Result<Box<dyn INode>, DecoderError> {
+        self.expect(b'{');
+        self.skip_whitespace();
+        if self.ch() == b'}' {
+            self.advance();
+            Ok(Box::new(ObjectNode {
+                map: HashMap::new(),
+            }))
+        } else {
+            let mut map = HashMap::new();
+            loop {
+                if self.ch() != b'"' {
+                    return Err(DecoderError::MissKey);
+                }
+                let key_result = self.parse_string();
+                if key_result.is_err() {
+                    return Err(key_result.err().unwrap());
+                }
+                self.skip_whitespace();
+                if self.ch() != b':' {
+                    return Err(DecoderError::MissColon);
+                } else {
+                    self.advance();
+                }
+                self.skip_whitespace();
+                let value_result = self.parse();
+                if value_result.is_err() {
+                    return value_result;
+                }
+                map.insert(key_result.unwrap(), value_result.unwrap());
+                self.skip_whitespace();
+                if self.ch() == b',' {
+                    self.advance();
+                    self.skip_whitespace();
+                } else if self.ch() == b'}' {
+                    self.advance();
+                    return Ok(Box::new(ObjectNode { map }));
+                } else {
+                    return Err(DecoderError::MissCommaOrCurlyBracket);
+                }
+            }
+        }
     }
 }
 
@@ -871,6 +939,200 @@ mod tests {
             assert!(
                 matches!(result.unwrap_err(), DecoderError::MissCommaOrSquareBracket),
                 "Expected MissCommaOrSquareBracket error for input: {}",
+                json
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_object() {
+        // Test empty object
+        let mut decoder = JsonDecoder::new();
+        let result = decoder.decode(String::from(" { } "));
+        assert!(result.is_ok());
+        let node = result.unwrap();
+        assert_eq!(node.node_type(), NodeType::OBJECT);
+        if let NodeValue::Object(map) = node.value() {
+            assert_eq!(map.len(), 0);
+        } else {
+            panic!("Expected NodeValue::Object");
+        }
+
+        // Test complex object with different value types
+        let mut decoder = JsonDecoder::new();
+        let result = decoder.decode(String::from(
+            " { \
+            \"n\" : null , \
+            \"f\" : false , \
+            \"t\" : true , \
+            \"i\" : 123 , \
+            \"s\" : \"abc\", \
+            \"a\" : [ 1, 2, 3 ], \
+            \"o\" : { \"1\" : 1, \"2\" : 2, \"3\" : 3 } \
+            } ",
+        ));
+
+        assert!(result.is_ok(), "Failed to parse complex object");
+        let node = result.unwrap();
+        assert_eq!(node.node_type(), NodeType::OBJECT);
+
+        if let NodeValue::Object(map) = node.value() {
+            assert_eq!(map.len(), 7, "Expected 7 key-value pairs in object");
+
+            // Helper function to find a key in the map
+            let find_key = |key: &str| {
+                map.iter().find(|(k, _)| {
+                    if let NodeValue::Text(text) = k.value() {
+                        text == key
+                    } else {
+                        false
+                    }
+                })
+            };
+
+            // Check "n": null
+            let (_, value) = find_key("n").expect("Key 'n' not found");
+            assert_eq!(value.node_type(), NodeType::NULL);
+
+            // Check "f": false
+            let (_, value) = find_key("f").expect("Key 'f' not found");
+            assert_eq!(value.node_type(), NodeType::FALSE);
+
+            // Check "t": true
+            let (_, value) = find_key("t").expect("Key 't' not found");
+            assert_eq!(value.node_type(), NodeType::TRUE);
+
+            // Check "i": 123
+            let (_, value) = find_key("i").expect("Key 'i' not found");
+            assert_eq!(value.node_type(), NodeType::NUMBER);
+            if let NodeValue::Number(num) = value.value() {
+                assert_eq!(num, 123.0);
+            } else {
+                panic!("Expected NodeValue::Number for key 'i'");
+            }
+
+            // Check "s": "abc"
+            let (_, value) = find_key("s").expect("Key 's' not found");
+            assert_eq!(value.node_type(), NodeType::STRING);
+            if let NodeValue::Text(text) = value.value() {
+                assert_eq!(text, "abc");
+            } else {
+                panic!("Expected NodeValue::Text for key 's'");
+            }
+
+            // Check "a": [1, 2, 3]
+            let (_, value) = find_key("a").expect("Key 'a' not found");
+            assert_eq!(value.node_type(), NodeType::ARRAY);
+            if let NodeValue::Array(elements) = value.value() {
+                assert_eq!(elements.len(), 3);
+                for i in 0..3 {
+                    assert_eq!(elements[i].node_type(), NodeType::NUMBER);
+                    if let NodeValue::Number(num) = elements[i].value() {
+                        assert_eq!(num, (i + 1) as f64);
+                    } else {
+                        panic!("Expected NodeValue::Number for array element {}", i);
+                    }
+                }
+            } else {
+                panic!("Expected NodeValue::Array for key 'a'");
+            }
+
+            // Check "o": {"1": 1, "2": 2, "3": 3}
+            let (_, value) = find_key("o").expect("Key 'o' not found");
+            assert_eq!(value.node_type(), NodeType::OBJECT);
+            if let NodeValue::Object(inner_map) = value.value() {
+                assert_eq!(inner_map.len(), 3);
+
+                // Check each of the inner object's key-value pairs
+                for i in 1..=3 {
+                    let key = i.to_string();
+                    let find_inner_key = |key: &str| {
+                        inner_map.iter().find(|(k, _)| {
+                            if let NodeValue::Text(text) = k.value() {
+                                text == key
+                            } else {
+                                false
+                            }
+                        })
+                    };
+
+                    let (_, inner_value) =
+                        find_inner_key(&key).expect(&format!("Inner key '{}' not found", key));
+                    assert_eq!(inner_value.node_type(), NodeType::NUMBER);
+                    if let NodeValue::Number(num) = inner_value.value() {
+                        assert_eq!(num, i as f64);
+                    } else {
+                        panic!("Expected NodeValue::Number for inner key '{}'", key);
+                    }
+                }
+            } else {
+                panic!("Expected NodeValue::Object for key 'o'");
+            }
+        } else {
+            panic!("Expected NodeValue::Object");
+        }
+    }
+
+    #[test]
+    fn test_parse_miss_key() {
+        let test_cases = vec![
+            "{:1,",      // Missing key before colon
+            "{1:1,",     // Number as key (not allowed in JSON)
+            "{true:1,",  // Boolean as key
+            "{false:1,", // Boolean as key
+            "{null:1,",  // Null as key
+            "{[]:1,",    // Array as key
+            "{{}:1,",    // Object as key
+            "{\"a\":1,", // Missing closing brace after comma
+        ];
+
+        for json in test_cases {
+            let mut decoder = JsonDecoder::new();
+            let result = decoder.decode(String::from(json));
+            assert!(result.is_err(), "Expected error for input: {}", json);
+            assert!(
+                matches!(result.unwrap_err(), DecoderError::MissKey),
+                "Expected MissKey error for input: {}",
+                json
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_miss_colon() {
+        let test_cases = vec![
+            "{\"a\"}",       // Missing colon after key
+            "{\"a\",\"b\"}", // Missing colon, has comma instead
+        ];
+
+        for json in test_cases {
+            let mut decoder = JsonDecoder::new();
+            let result = decoder.decode(String::from(json));
+            assert!(result.is_err(), "Expected error for input: {}", json);
+            assert!(
+                matches!(result.unwrap_err(), DecoderError::MissColon),
+                "Expected MissColon error for input: {}",
+                json
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_miss_comma_or_curly_bracket() {
+        let test_cases = vec![
+            "{\"a\":1",       // Missing closing brace
+            "{\"a\":1]",      // Wrong closing bracket (square instead of curly)
+            "{\"a\":1 \"b\"", // Missing comma between key-value pairs
+            "{\"a\":{}",      // Missing closing brace after nested object
+        ];
+
+        for json in test_cases {
+            let mut decoder = JsonDecoder::new();
+            let result = decoder.decode(String::from(json));
+            assert!(result.is_err(), "Expected error for input: {}", json);
+            assert!(
+                matches!(result.unwrap_err(), DecoderError::MissCommaOrCurlyBracket),
+                "Expected MissCommaOrCurlyBracket error for input: {}",
                 json
             );
         }
