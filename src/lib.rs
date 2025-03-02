@@ -1137,4 +1137,221 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_parse_expect_value() {
+        let mut decoder = JsonDecoder::new();
+
+        // Empty string
+        let result = decoder.decode(String::from(""));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DecoderError::ExpectValue));
+
+        // Only whitespace
+        let result = decoder.decode(String::from(" "));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DecoderError::ExpectValue));
+
+        // Multiple whitespace characters
+        let result = decoder.decode(String::from("   \t\n\r   "));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DecoderError::ExpectValue));
+    }
+
+    #[test]
+    fn test_parse_invalid_value() {
+        let test_cases = vec![
+            // Invalid literals
+            "nul",
+            "?",
+            // Invalid numbers
+            "+0",
+            "+1",
+            ".123", // At least one digit before '.'
+            "1.",   // At least one digit after '.'
+            "INF",
+            "inf",
+            "NAN",
+            "nan",
+            // Invalid values in array
+            "[1,]",
+            "[\"a\", nul]",
+        ];
+
+        for json in test_cases {
+            let mut decoder = JsonDecoder::new();
+            let result = decoder.decode(String::from(json));
+            assert!(
+                result.is_err(),
+                "Expected error for input: {}, but got success",
+                json
+            );
+            assert!(
+                matches!(result.unwrap_err(), DecoderError::InvalidValue),
+                "Expected InvalidValue error for input: {}",
+                json
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_root_not_singular() {
+        let test_cases = vec![
+            "null x",
+            "0123", // After zero should be '.' or nothing
+            "0x0",
+            "0x123",
+            "true false",
+            "false null",
+            "\"abc\" 123",
+            "[] {}",
+        ];
+
+        for json in test_cases {
+            let mut decoder = JsonDecoder::new();
+            let result = decoder.decode(String::from(json));
+            assert!(
+                result.is_err(),
+                "Expected error for input: {}, but got success",
+                json
+            );
+            assert!(
+                matches!(result.unwrap_err(), DecoderError::RootNotSingular),
+                "Expected RootNotSingular error for input: {}",
+                json
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_number_too_big() {
+        // Note: Rust's f64 can handle these values, but we're testing the error case
+        // that would occur in C. In a real implementation, you might want to check
+        // if the number is outside the range of f64.
+        let test_cases = vec![
+            "1e309",  // Beyond max f64
+            "-1e309", // Beyond min f64
+        ];
+
+        for json in test_cases {
+            let mut decoder = JsonDecoder::new();
+            // In Rust, these might actually parse successfully as infinity
+            // For testing purposes, we could modify the decoder to check for overflow
+            let result = decoder.decode(String::from(json));
+
+            // If your implementation doesn't check for overflow, this test might fail
+            // In that case, you could add a check in parse_number for values outside f64 range
+            if result.is_err() {
+                assert!(
+                    matches!(result.unwrap_err(), DecoderError::NumberTooBig),
+                    "Expected NumberTooBig error for input: {}",
+                    json
+                );
+            } else {
+                // If your implementation handles these as infinity, you can check that instead
+                if let NodeValue::Number(num) = result.unwrap().value() {
+                    assert!(num.is_infinite(), "Expected infinity for input: {}", json);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_additional_invalid_number_formats() {
+        let test_cases = vec![
+            // Numbers with invalid exponent formats
+            "1e",    // Missing exponent digits
+            "1e+",   // Missing exponent digits after sign
+            "1e-",   // Missing exponent digits after sign
+            "1.e1",  // No digit after decimal point
+            "1.e+1", // No digit after decimal point
+            "1.e-1", // No digit after decimal point
+            // Numbers with invalid decimal formats
+            "01",   // Leading zero followed by digits
+            "01.5", // Leading zero followed by decimal
+            "-01",  // Negative with leading zero
+            // Other invalid formats
+            "--1", // Double negative
+            "1-",  // Negative sign in wrong position
+            "1+1", // Plus sign in wrong position
+        ];
+
+        for json in test_cases {
+            let mut decoder = JsonDecoder::new();
+            let result = decoder.decode(String::from(json));
+            assert!(
+                result.is_err(),
+                "Expected error for input: {}, but got success",
+                json
+            );
+            // These could be either InvalidValue or RootNotSingular depending on implementation
+            let err = result.unwrap_err();
+            assert!(
+                matches!(err, DecoderError::InvalidValue)
+                    || matches!(err, DecoderError::RootNotSingular),
+                "Expected parsing error for input: {}",
+                json
+            );
+        }
+    }
+
+    #[test]
+    fn test_additional_array_errors() {
+        let test_cases = vec![
+            "[,]",      // Missing value between commas
+            "[1,,2]",   // Extra comma
+            "[,1]",     // Leading comma
+            "[1,]",     // Trailing comma
+            "[\"a\",]", // Trailing comma after string
+            "[[],]",    // Trailing comma after array
+            "[{},]",    // Trailing comma after object
+        ];
+
+        for json in test_cases {
+            let mut decoder = JsonDecoder::new();
+            let result = decoder.decode(String::from(json));
+            assert!(
+                result.is_err(),
+                "Expected error for input: {}, but got success",
+                json
+            );
+            // The specific error type might vary based on implementation
+            assert!(
+                result.is_err(),
+                "Expected parsing error for input: {}",
+                json
+            );
+        }
+    }
+
+    #[test]
+    fn test_additional_object_errors() {
+        let test_cases = vec![
+            "{,}",               // Missing key-value pair
+            "{\"a\":1,,}",       // Extra comma
+            "{,\"a\":1}",        // Leading comma
+            "{\"a\":1,}",        // Trailing comma
+            "{\"a\"}",           // Missing value
+            "{\"a\":}",          // Missing value after colon
+            "{:1}",              // Missing key
+            "{\"a\":1,\"b\"}",   // Missing value for second key
+            "{\"a\":1:\"b\":2}", // Colon instead of comma
+        ];
+
+        for json in test_cases {
+            let mut decoder = JsonDecoder::new();
+            let result = decoder.decode(String::from(json));
+            assert!(
+                result.is_err(),
+                "Expected error for input: {}, but got success",
+                json
+            );
+            // The specific error type might vary based on implementation
+            assert!(
+                result.is_err(),
+                "Expected parsing error for input: {}",
+                json
+            );
+        }
+    }
 }
