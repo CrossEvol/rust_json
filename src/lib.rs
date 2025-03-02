@@ -193,6 +193,7 @@ pub enum DecoderError {
     InvalidStringChar,
     InvalidUnicodeHex,
     InvalidUnicodeSurrogate,
+    InvalidUtf8Sequence,
     MissCommaOrSquareBracket,
     MissKey,
     MissColon,
@@ -213,6 +214,11 @@ impl JsonDecoder {
             text: String::from(""),
             pos: 0,
         }
+    }
+
+    fn expect(&mut self, ch: u8) {
+        assert!(self.ch() == ch);
+        self.advance();
     }
 
     fn advance(&mut self) {
@@ -281,8 +287,99 @@ impl JsonDecoder {
         }
     }
 
-    fn parse_string(&self) -> Result<Box<dyn INode>, DecoderError> {
-        todo!()
+    fn parse_string(&mut self) -> Result<Box<dyn INode>, DecoderError> {
+        self.expect(b'"');
+        loop {
+            match self.ch() {
+                b'"' => {
+                    self.advance();
+                    let str_value = String::from_utf8(std::mem::take(&mut self.stack))
+                        .map_err(|_| DecoderError::InvalidUtf8Sequence)?;
+                    return Ok(Box::new(StringNode { str_value }));
+                }
+                b'\\' => {
+                    self.advance();
+                    let ch = self.ch();
+                    self.advance();
+                    match ch {
+                        b'"' => self.push(b'"'),
+                        b'\\' => self.push(b'\\'),
+                        b'/' => self.push(b'/'),
+                        b'b' => self.push(0x08),
+                        b'f' => self.push(0x0C),
+                        b'n' => self.push(b'\n'),
+                        b'r' => self.push(b'\r'),
+                        b't' => self.push(b'\t'),
+                        b'u' => {
+                            let u32 = self.parse_hex4().ok_or(DecoderError::InvalidUnicodeHex)?;
+                            let u = if (0xD800..=0xDBFF).contains(&u32) {
+                                if self.ch() != b'\\' {
+                                    return Err(DecoderError::InvalidUnicodeSurrogate);
+                                }
+                                self.advance();
+                                if self.ch() != b'u' {
+                                    return Err(DecoderError::InvalidUnicodeSurrogate);
+                                }
+                                self.advance();
+                                let u32_2 =
+                                    self.parse_hex4().ok_or(DecoderError::InvalidUnicodeHex)?;
+                                if !(0xDC00..=0xDFFF).contains(&u32_2) {
+                                    return Err(DecoderError::InvalidUnicodeSurrogate);
+                                }
+                                (((u32 - 0xD800) << 10) | (u32_2 - 0xDC00)) + 0x10000
+                            } else {
+                                u32
+                            };
+                            self.encode_utf(u);
+                        }
+                        _ => return Err(DecoderError::InvalidStringEscape),
+                    }
+                }
+                b'\0' => return Err(DecoderError::MissQuotationMark),
+                ch if ch < 0x20 => return Err(DecoderError::InvalidStringChar),
+                _ => self.eat(),
+            }
+        }
+    }
+
+    fn parse_hex4(&mut self) -> Option<u32> {
+        let mut u: u32 = 0;
+        for _ in 0..4 {
+            let ch = self.ch();
+            self.advance();
+            u <<= 4;
+            match ch {
+                b'0'..=b'9' => u |= (ch - b'0') as u32,
+                b'A'..=b'F' => u |= (ch - (b'A' - 10)) as u32,
+                b'a'..=b'f' => u |= (ch - (b'a' - 10)) as u32,
+                _ => return None,
+            }
+        }
+        Some(u)
+    }
+
+    fn encode_utf(&mut self, u: u32) {
+        match u {
+            0..=0x7F => {
+                self.push((u & 0xFF) as u8);
+            }
+            0x80..=0x7FF => {
+                self.push((0xC0 | ((u >> 6) & 0xFF)) as u8);
+                self.push((0x80 | (u & 0x3F)) as u8);
+            }
+            0x800..=0xFFFF => {
+                self.push((0xE0 | ((u >> 12) & 0xFF)) as u8);
+                self.push((0x80 | ((u >> 6) & 0x3F)) as u8);
+                self.push((0x80 | (u & 0x3F)) as u8);
+            }
+            0x10000..=0x10FFFF => {
+                self.push((0xF0 | ((u >> 18) & 0xFF)) as u8);
+                self.push((0x80 | ((u >> 12) & 0x3F)) as u8);
+                self.push((0x80 | ((u >> 6) & 0x3F)) as u8);
+                self.push((0x80 | (u & 0x3F)) as u8);
+            }
+            _ => panic!("Invalid Unicode code point: {}", u),
+        }
     }
 
     fn parse_number(&mut self) -> Result<Box<dyn INode>, DecoderError> {
@@ -326,8 +423,8 @@ impl JsonDecoder {
             }
 
             // Use the stack directly without cloning
-            let number_string =
-                String::from_utf8(std::mem::take(&mut self.stack)).expect("Invalid UTF-8 sequence");
+            let number_string = String::from_utf8(std::mem::take(&mut self.stack))
+                .expect("Invalid UTF-8 sequence when parse_number");
             let number: f64 = number_string
                 .parse()
                 .expect("Unable to parse string to number");
@@ -486,5 +583,175 @@ mod tests {
         test_number(-f64::MIN_POSITIVE, &format!("-{}", f64::MIN_POSITIVE));
         test_number(f64::MAX, &format!("{}", f64::MAX));
         test_number(-f64::MAX, &format!("-{}", f64::MAX));
+    }
+
+    #[test]
+    fn test_parse_string() {
+        // Helper function to test string parsing
+        fn test_string(expected: &str, json: &str) {
+            let mut decoder = JsonDecoder::new();
+            let result = decoder.decode(String::from(json));
+            assert!(result.is_ok(), "Failed to parse: {}", json);
+            let node = result.unwrap();
+            assert_eq!(
+                node.node_type(),
+                NodeType::STRING,
+                "Not a string type for input: {}",
+                json
+            );
+
+            if let NodeValue::Text(text) = node.value() {
+                assert_eq!(
+                    text, expected,
+                    "Expected '{}' but got '{}' for input: '{}'",
+                    expected, text, json
+                );
+            } else {
+                panic!("Expected NodeValue::Text for input: {}", json);
+            }
+        }
+
+        // Empty string
+        test_string("", "\"\"");
+
+        // Simple string
+        test_string("Hello", "\"Hello\"");
+
+        // String with newline escape
+        test_string("Hello\nWorld", "\"Hello\\nWorld\"");
+
+        // String with all escape characters
+        test_string(
+            "\" \\ / \u{8} \u{c} \n \r \t",
+            "\"\\\" \\\\ \\/ \\b \\f \\n \\r \\t\"",
+        );
+
+        // String with null character
+        test_string("Hello\0World", "\"Hello\\u0000World\"");
+
+        // Unicode characters
+        test_string("\u{0024}", "\"\\u0024\""); // Dollar sign U+0024
+        test_string("\u{00A2}", "\"\\u00A2\""); // Cents sign U+00A2
+        test_string("\u{20AC}", "\"\\u20AC\""); // Euro sign U+20AC
+
+        // Surrogate pairs
+        test_string("\u{1D11E}", "\"\\uD834\\uDD1E\""); // G clef sign U+1D11E
+        test_string("\u{1D11E}", "\"\\ud834\\udd1e\""); // G clef sign U+1D11E (lowercase hex)
+
+        // String with whitespace
+        test_string("Hello", "  \"Hello\"  ");
+    }
+
+    #[test]
+    fn test_parse_invalid_string_escape() {
+        let test_cases = vec![
+            "\"\\v\"",   // Invalid escape character 'v'
+            "\"\\'\"",   // Invalid escape character '\''
+            "\"\\0\"",   // Invalid escape character '0'
+            "\"\\x12\"", // Invalid escape character 'x'
+        ];
+
+        for json in test_cases {
+            let mut decoder = JsonDecoder::new();
+            let result = decoder.decode(String::from(json));
+            assert!(result.is_err(), "Expected error for input: {}", json);
+            assert!(
+                matches!(result.unwrap_err(), DecoderError::InvalidStringEscape),
+                "Expected InvalidStringEscape error for input: {}",
+                json
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_invalid_string_char() {
+        // Test control characters (0x01-0x1F) which are not allowed in JSON strings
+        let test_cases = vec![
+            "\"\x01\"", // Control character 0x01
+            "\"\x1F\"", // Control character 0x1F
+        ];
+
+        for json in test_cases {
+            let mut decoder = JsonDecoder::new();
+            let result = decoder.decode(String::from(json));
+            assert!(result.is_err(), "Expected error for input: {}", json);
+            assert!(
+                matches!(result.unwrap_err(), DecoderError::InvalidStringChar),
+                "Expected InvalidStringChar error for input: {}",
+                json
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_invalid_unicode_hex() {
+        let test_cases = vec![
+            "\"\\u\"",     // Missing all 4 hex digits
+            "\"\\u0\"",    // Missing 3 hex digits
+            "\"\\u01\"",   // Missing 2 hex digits
+            "\"\\u012\"",  // Missing 1 hex digit
+            "\"\\u/000\"", // Invalid hex character '/'
+            "\"\\uG000\"", // Invalid hex character 'G'
+            "\"\\u0/00\"", // Invalid hex character '/'
+            "\"\\u0G00\"", // Invalid hex character 'G'
+            "\"\\u00/0\"", // Invalid hex character '/'
+            "\"\\u00G0\"", // Invalid hex character 'G'
+            "\"\\u000/\"", // Invalid hex character '/'
+            "\"\\u000G\"", // Invalid hex character 'G'
+            "\"\\u 123\"", // Space is not a valid hex character
+        ];
+
+        for json in test_cases {
+            let mut decoder = JsonDecoder::new();
+            let result = decoder.decode(String::from(json));
+            assert!(result.is_err(), "Expected error for input: {}", json);
+            assert!(
+                matches!(result.unwrap_err(), DecoderError::InvalidUnicodeHex),
+                "Expected InvalidUnicodeHex error for input: {}",
+                json
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_invalid_unicode_surrogate() {
+        let test_cases = vec![
+            "\"\\uD800\"",        // High surrogate without low surrogate
+            "\"\\uDBFF\"",        // High surrogate without low surrogate
+            "\"\\uD800\\\\\"",    // High surrogate followed by backslash, not \u
+            "\"\\uD800\\uDBFF\"", // High surrogate followed by another high surrogate
+            "\"\\uD800\\uE000\"", // High surrogate followed by non-surrogate
+        ];
+
+        for json in test_cases {
+            let mut decoder = JsonDecoder::new();
+            let result = decoder.decode(String::from(json));
+            assert!(result.is_err(), "Expected error for input: {}", json);
+            assert!(
+                matches!(result.unwrap_err(), DecoderError::InvalidUnicodeSurrogate),
+                "Expected InvalidUnicodeSurrogate error for input: {}",
+                json
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_miss_quotation_mark() {
+        let test_cases = vec![
+            "\"",     // Missing closing quote
+            "\"abc",  // Missing closing quote after content
+            "\"\\\"", // Missing closing quote after escaped quote
+        ];
+
+        for json in test_cases {
+            let mut decoder = JsonDecoder::new();
+            let result = decoder.decode(String::from(json));
+            assert!(result.is_err(), "Expected error for input: {}", json);
+            assert!(
+                matches!(result.unwrap_err(), DecoderError::MissQuotationMark),
+                "Expected MissQuotationMark error for input: {}",
+                json
+            );
+        }
     }
 }
