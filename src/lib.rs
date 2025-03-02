@@ -252,11 +252,11 @@ impl JsonDecoder {
 
     pub fn decode(&mut self, text: String) -> Result<Box<dyn INode>, DecoderError> {
         self.text = text;
-        self.parse_whitespace();
+        self.skip_whitespace();
         let res = self.parse();
         match res {
             Ok(node) => {
-                self.parse_whitespace();
+                self.skip_whitespace();
                 if self.ch() != b'\0' {
                     Err(DecoderError::RootNotSingular)
                 } else {
@@ -281,7 +281,7 @@ impl JsonDecoder {
         }
     }
 
-    fn parse_whitespace(&mut self) {
+    fn skip_whitespace(&mut self) {
         while self.ch().is_ascii_whitespace() {
             self.advance();
         }
@@ -459,7 +459,7 @@ impl JsonDecoder {
 
     fn parse_array(&mut self) -> Result<Box<dyn INode>, DecoderError> {
         self.expect(b'[');
-        self.parse_whitespace();
+        self.skip_whitespace();
         if self.ch() == b']' {
             self.advance();
             Ok(Box::new(ArrayNode { list: vec![] }))
@@ -471,10 +471,10 @@ impl JsonDecoder {
                     return element;
                 }
                 list.push(element.unwrap());
-                self.parse_whitespace();
+                self.skip_whitespace();
                 if self.ch() == b',' {
                     self.advance();
-                    self.parse_whitespace();
+                    self.skip_whitespace();
                 } else if self.ch() == b']' {
                     self.advance();
                     return Ok(Box::new(ArrayNode { list }));
