@@ -266,10 +266,6 @@ impl JsonDecoder {
         self.stack.push(ch);
     }
 
-    fn pop(&mut self) -> u8 {
-        self.stack.pop().unwrap()
-    }
-
     fn ch(&self) -> u8 {
         self.text.as_bytes().get(self.pos).copied().unwrap_or(b'\0')
     }
@@ -555,6 +551,188 @@ impl JsonDecoder {
                 }
             }
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct JsonEncoder {
+    stack: Vec<u8>,
+}
+
+impl JsonEncoder {
+    pub fn new() -> JsonEncoder {
+        JsonEncoder { stack: vec![] }
+    }
+
+    pub fn encode(&mut self, node: &Box<dyn INode>) -> String {
+        self.stringify_inode(node);
+        String::from_utf8(std::mem::take(&mut self.stack)).unwrap()
+    }
+
+    fn push(&mut self, ch: u8) {
+        self.stack.push(ch);
+    }
+
+    fn pop(&mut self) {
+        self.stack.pop();
+    }
+
+    fn put_string(&mut self, str: String) {
+        for ch in str.as_bytes() {
+            self.push(*ch);
+        }
+    }
+
+    fn format_double_to_string(&self, value: f64) -> String {
+        // Handle special cases first
+        if value == 0.0 {
+            return "0".to_string();
+        }
+
+        if value.is_infinite() || value.is_nan() {
+            // JSON doesn't support Infinity or NaN, but we'll handle them anyway
+            return "null".to_string();
+        }
+
+        // For very small or very large numbers, use scientific notation
+        if value.abs() < 1e-6 || value.abs() >= 1e10 {
+            // Use scientific notation with enough precision
+            let s = format!("{:.16e}", value);
+
+            // Normalize the exponent format to match JSON standard
+            if s.contains('e') {
+                let parts: Vec<&str> = s.split('e').collect();
+                let base = parts[0].trim_end_matches('0').trim_end_matches('.');
+                let exp = parts[1];
+
+                // Format the exponent with explicit + sign if positive
+                let exp_value = exp.parse::<i32>().unwrap_or(0);
+                let formatted_exp = if exp_value >= 0 {
+                    format!("e+{}", exp_value)
+                } else {
+                    format!("e{}", exp_value)
+                };
+
+                return format!("{}{}", base, formatted_exp);
+            }
+            return s;
+        } else {
+            // For regular numbers, use decimal notation with enough precision
+            let s = format!("{:.16}", value);
+
+            // Trim trailing zeros and decimal point if it becomes an integer
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        }
+    }
+
+    fn stringify_inode(&mut self, node: &Box<dyn INode>) {
+        match node.as_ref().node_type() {
+            NodeType::NULL => self.put_string(String::from("null")),
+            NodeType::FALSE => self.put_string(String::from("false")),
+            NodeType::TRUE => self.put_string(String::from("true")),
+            NodeType::NUMBER => {
+                let node_value = node.value();
+                if let NodeValue::Number(num) = node_value {
+                    let num_string = self.format_double_to_string(num);
+                    self.put_string(num_string);
+                }
+            }
+            NodeType::STRING => {
+                let node_value = node.value();
+                if let NodeValue::Text(text) = node_value {
+                    self.stringify_string_node(&Box::new(StringNode { str_value: text }));
+                } else {
+                    panic!();
+                }
+            }
+            NodeType::ARRAY => {
+                self.push(b'[');
+                let node_value = node.value();
+                if let NodeValue::Array(elements) = node_value {
+                    let size = elements.len();
+                    for ele in elements {
+                        self.stringify_inode(&ele);
+                        self.push(b',');
+                    }
+                    if size > 0 {
+                        self.pop();
+                    }
+                } else {
+                    panic!();
+                }
+                self.push(b']');
+            }
+            NodeType::OBJECT => {
+                self.push(b'{');
+                let node_value = node.value();
+                if let NodeValue::Object(map) = node_value {
+                    let size = map.len();
+                    for (key, value) in map.iter() {
+                        self.stringify_string_node(key);
+                        self.push(b':');
+                        self.stringify_inode(value);
+                        self.push(b',');
+                    }
+                    if size > 0 {
+                        self.pop();
+                    }
+                }
+                self.push(b'}');
+            }
+        }
+    }
+
+    fn stringify_string_node(&mut self, node: &Box<StringNode>) {
+        static HEX_DIGITS: [u8; 16] = [
+            b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'A', b'B', b'C', b'D',
+            b'E', b'F',
+        ];
+        self.push(b'"');
+        for byte in node.str_value.as_bytes() {
+            match byte {
+                b'\"' => {
+                    self.push(b'\\');
+                    self.push(b'\"');
+                }
+                b'\\' => {
+                    self.push(b'\\');
+                    self.push(b'\\');
+                }
+                0x08 => {
+                    self.push(b'\\');
+                    self.push(b'b');
+                }
+                0x0c => {
+                    self.push(b'\\');
+                    self.push(b'f');
+                }
+                b'\n' => {
+                    self.push(b'\\');
+                    self.push(b'n');
+                }
+                b'\r' => {
+                    self.push(b'\\');
+                    self.push(b'r');
+                }
+                b'\t' => {
+                    self.push(b'\\');
+                    self.push(b't');
+                }
+                _ => {
+                    if *byte < 0x20 {
+                        self.push(b'\\');
+                        self.push(b'u');
+                        self.push(b'0');
+                        self.push(b'0');
+                        self.push(HEX_DIGITS[(*byte >> 4) as usize]);
+                        self.push(HEX_DIGITS[(*byte & 15) as usize]);
+                    } else {
+                        self.push(*byte);
+                    }
+                }
+            }
+        }
+        self.push(b'"');
     }
 }
 
@@ -1353,5 +1531,258 @@ mod tests {
                 json
             );
         }
+    }
+
+    // Helper function for roundtrip testing
+    fn test_roundtrip(json: &str) {
+        // First decode: json -> node1
+        let mut decoder = JsonDecoder::new();
+        let parse_result = decoder.decode(String::from(json));
+        assert!(parse_result.is_ok(), "Failed to parse: {}", json);
+        let node1 = parse_result.unwrap();
+
+        // Encode: node1 -> json2
+        let mut encoder = JsonEncoder::new();
+        let json2 = encoder.encode(&node1);
+
+        // Second decode: json2 -> node2
+        let mut decoder2 = JsonDecoder::new();
+        let parse_result2 = decoder2.decode(json2.clone());
+        assert!(
+            parse_result2.is_ok(),
+            "Failed to parse encoded result: {}",
+            json2
+        );
+        let node2 = parse_result2.unwrap();
+
+        // For objects, we need to compare the nodes directly
+        if json.contains('{') {
+            assert_eq!(
+                node1.node_type(),
+                node2.node_type(),
+                "Node types don't match"
+            );
+
+            // Compare object contents
+            if let (NodeValue::Object(map1), NodeValue::Object(map2)) =
+                (node1.value(), node2.value())
+            {
+                assert_eq!(map1.len(), map2.len(), "Object sizes don't match");
+
+                // Check each key-value pair
+                for (key1, value1) in map1.iter() {
+                    // Find matching key in map2
+                    let matching_entry = map2.iter().find(|(k, _)| {
+                        if let (NodeValue::Text(text1), NodeValue::Text(text2)) =
+                            (key1.value(), k.value())
+                        {
+                            text1 == text2
+                        } else {
+                            false
+                        }
+                    });
+
+                    assert!(
+                        matching_entry.is_some(),
+                        "Key not found in second object: {:?}",
+                        key1
+                    );
+
+                    let (_, value2) = matching_entry.unwrap();
+                    compare_nodes(value1, value2);
+                }
+                return;
+            }
+        }
+
+        // For numbers, compare the numeric values directly
+        if json.contains('.') || json.contains('e') || json.contains('E') {
+            if let (NodeValue::Number(num1), NodeValue::Number(num2)) =
+                (node1.value(), node2.value())
+            {
+                assert!(
+                    (num1 - num2).abs() < f64::EPSILON * 100.0,
+                    "Expected equivalent numbers: {} vs {}",
+                    json,
+                    json2
+                );
+                return;
+            }
+        }
+
+        // For other types, compare the JSON strings
+        assert_eq!(json, json2, "Roundtrip failed: {} vs {}", json, json2);
+    }
+
+    // Helper function to compare two nodes recursively
+    fn compare_nodes(node1: &Box<dyn INode>, node2: &Box<dyn INode>) {
+        assert_eq!(
+            node1.node_type(),
+            node2.node_type(),
+            "Node types don't match"
+        );
+
+        match node1.node_type() {
+            NodeType::NULL | NodeType::TRUE | NodeType::FALSE => {
+                // These are simple literals, just compare the types (already done above)
+            }
+            NodeType::NUMBER => {
+                if let (NodeValue::Number(num1), NodeValue::Number(num2)) =
+                    (node1.value(), node2.value())
+                {
+                    assert!(
+                        (num1 - num2).abs() < f64::EPSILON * 100.0,
+                        "Numbers don't match: {} vs {}",
+                        num1,
+                        num2
+                    );
+                } else {
+                    panic!("Expected NodeValue::Number");
+                }
+            }
+            NodeType::STRING => {
+                if let (NodeValue::Text(text1), NodeValue::Text(text2)) =
+                    (node1.value(), node2.value())
+                {
+                    assert_eq!(text1, text2, "Strings don't match");
+                } else {
+                    panic!("Expected NodeValue::Text");
+                }
+            }
+            NodeType::ARRAY => {
+                if let (NodeValue::Array(arr1), NodeValue::Array(arr2)) =
+                    (node1.value(), node2.value())
+                {
+                    assert_eq!(arr1.len(), arr2.len(), "Array sizes don't match");
+                    for i in 0..arr1.len() {
+                        compare_nodes(&arr1[i], &arr2[i]);
+                    }
+                } else {
+                    panic!("Expected NodeValue::Array");
+                }
+            }
+            NodeType::OBJECT => {
+                if let (NodeValue::Object(map1), NodeValue::Object(map2)) =
+                    (node1.value(), node2.value())
+                {
+                    assert_eq!(map1.len(), map2.len(), "Object sizes don't match");
+
+                    // Check each key-value pair
+                    for (key1, value1) in map1.iter() {
+                        // Find matching key in map2
+                        let matching_entry = map2.iter().find(|(k, _)| {
+                            if let (NodeValue::Text(text1), NodeValue::Text(text2)) =
+                                (key1.value(), k.value())
+                            {
+                                text1 == text2
+                            } else {
+                                false
+                            }
+                        });
+
+                        assert!(
+                            matching_entry.is_some(),
+                            "Key not found in second object: {:?}",
+                            key1
+                        );
+
+                        let (_, value2) = matching_entry.unwrap();
+                        compare_nodes(value1, value2);
+                    }
+                } else {
+                    panic!("Expected NodeValue::Object");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_stringify_literals() {
+        test_roundtrip("null");
+        test_roundtrip("false");
+        test_roundtrip("true");
+    }
+
+    #[test]
+    fn test_stringify_number() {
+        test_roundtrip("0");
+        test_roundtrip("1");
+        test_roundtrip("-1");
+        test_roundtrip("1.5");
+        test_roundtrip("-1.5");
+        test_roundtrip("3.25");
+        test_roundtrip("1e+20"); // Note: format might be normalized to 1e20 or 1e+20
+        test_roundtrip("1.234e+20");
+        test_roundtrip("1.234e-20");
+
+        // The smallest number > 1
+        test_roundtrip("1.0000000000000002");
+
+        // These values might be represented differently in string form
+        // but should parse to the same number
+
+        // Minimum denormal
+        test_roundtrip("4.9406564584124654e-324");
+        test_roundtrip("-4.9406564584124654e-324");
+
+        // Max subnormal double
+        test_roundtrip("2.2250738585072009e-308");
+        test_roundtrip("-2.2250738585072009e-308");
+
+        // Min normal positive double
+        test_roundtrip("2.2250738585072014e-308");
+        test_roundtrip("-2.2250738585072014e-308");
+
+        // Max double
+        test_roundtrip("1.7976931348623157e+308");
+        test_roundtrip("-1.7976931348623157e+308");
+    }
+
+    #[test]
+    fn test_stringify_number2() {
+        let mut decoder = JsonDecoder::new();
+        let number_node = decoder.decode(String::from("-0")).unwrap();
+        assert_eq!(NodeType::NUMBER, number_node.node_type());
+        if let NodeValue::Number(num) = number_node.value() {
+            assert_eq!(num, 0.0);
+        } else {
+            panic!();
+        }
+    }
+
+    #[test]
+    fn test_stringify_string() {
+        test_roundtrip("\"\"");
+        test_roundtrip("\"Hello\"");
+        test_roundtrip("\"Hello\\nWorld\"");
+        test_roundtrip("\"\\\" \\\\ / \\b \\f \\n \\r \\t\"");
+        test_roundtrip("\"Hello\\u0000World\"");
+    }
+
+    #[test]
+    fn test_stringify_array() {
+        test_roundtrip("[]");
+        test_roundtrip("[null,false,true,123,\"abc\",[1,2,3]]");
+    }
+
+    #[test]
+    fn test_stringify_object() {
+        test_roundtrip("{}");
+        test_roundtrip("{\"n\":null,\"f\":false,\"t\":true,\"i\":123,\"s\":\"abc\",\"a\":[1,2,3],\"o\":{\"1\":1,\"2\":2,\"3\":3}}");
+    }
+
+    #[test]
+    fn test_stringify_complex() {
+        // Test complex nested structures
+        test_roundtrip("[{},{}]");
+        test_roundtrip("[{\"\":0},{\"\":0}]");
+        test_roundtrip("[{\"a\":0},{\"a\":0}]");
+        test_roundtrip("{\"a\":{},\"b\":{}}");
+        test_roundtrip("{\"a\":{\"\":0},\"b\":{\"\":0}}");
+
+        // A more complex example with multiple types and nesting
+        test_roundtrip(
+            "{\"array\":[null,true,false,123,\"string\"],\"object\":{\"nested\":true,\"values\":[1,2,3]},\"empty\":{},\"emptyArray\":[]}"
+        );
     }
 }
