@@ -1,4 +1,4 @@
-use rust_json::{JsonDecoder, JsonEncoder};
+use rust_json::{self, decoder::JsonDecoder, encoder::JsonEncoder};
 
 fn main() {
     let ch = '5';
